@@ -3,11 +3,10 @@ import { ClientProxy } from '@nestjs/microservices';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Ticket, Seat } from '@app/common';
 import { Repository } from 'typeorm';
-import Redis from 'ioredis'; // Pastikan import ini ada
+import Redis from 'ioredis';
 
 @Injectable()
 export class EngineService {
-  // 1. Inisialisasi Redis Client
   private readonly redis = new Redis({
     host: 'localhost',
     port: 6379,
@@ -19,12 +18,9 @@ export class EngineService {
     @InjectRepository(Seat) private readonly seatRepo: Repository<Seat>,
   ) {}
 
-  // === LOGIKA BOOKING FULL (DB + REDIS + QUEUE) ===
   async bookSeat(seatId: string, userId: string) {
     console.log(`\n🎫 Request Booking: ${seatId} oleh ${userId}`);
 
-    // --- STEP 1: VALIDASI DATABASE (Satpam Gudang) ---
-    // Pastikan kursi benar-benar ada dan statusnya AVAILABLE
     const seat = await this.seatRepo.findOne({
       where: { seatNumber: seatId },
     });
@@ -39,13 +35,8 @@ export class EngineService {
       throw new Error(`Kursi ${seatId} sudah terjual.`);
     }
 
-    // --- STEP 2: REDIS LOCK (Wasit Balapan) ---
-    // Mencegah Race Condition (2 orang booking bersamaan)
     const redisKey = `lock:seat:${seatId}`;
 
-    // SETNX (Set if Not Exists) + Expire 10 menit (600 detik)
-    // Jika return 'OK' -> Berhasil kunci
-    // Jika return null -> Gagal (sudah dikunci orang lain)
     const isLocked = await this.redis.set(redisKey, userId, 'EX', 600, 'NX');
 
     if (!isLocked) {
@@ -59,14 +50,11 @@ export class EngineService {
 
     console.log(`✅ KUNCI REDIS: Berhasil mengunci ${seatId} untuk ${userId}`);
 
-    // --- STEP 3: KIRIM KE WORKER (RabbitMQ) + RELEASE LOCK ---
     try {
-      // Emit event ke RabbitMQ
       await this.client.emit('ticket_created', { seatId, userId }).toPromise();
 
       console.log(`📤 Event terkirim ke Worker untuk ${seatId}`);
 
-      // ✅ RELEASE LOCK SETELAH SUKSES KIRIM
       await this.redis.del(redisKey);
       console.log(`🔓 UNLOCK REDIS: Kunci ${seatId} dilepas.`);
 
@@ -76,7 +64,6 @@ export class EngineService {
         userId,
       };
     } catch (error) {
-      // ✅ RELEASE LOCK JIKA GAGAL KIRIM EVENT
       await this.redis.del(redisKey);
       console.log(
         `🔓 UNLOCK REDIS (ERROR): Kunci ${seatId} dilepas karena error.`,
@@ -86,8 +73,6 @@ export class EngineService {
       throw new Error('Gagal memproses booking. Silakan coba lagi.');
     }
   }
-
-  // ... (Fungsi getAllTickets & seedSeats tetap sama, biarkan di bawah sini) ...
 
   async getAllTickets() {
     return this.ticketRepo.find({ order: { createdAt: 'DESC' } });

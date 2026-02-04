@@ -1,12 +1,9 @@
-// war-test.js
 const SERVER_URL = "http://localhost:3000/book";
-const TOTAL_ATTACKERS = 100; // Jumlah penyerang
-const TARGET_SEAT = "A-1"; // ✅ Kursi yang direbutkan (sesuai seed)
+const TOTAL_ATTACKERS = 100;
+const TARGET_SEAT = "A-1";
 
 async function attack() {
-  console.log(
-    `🔥 MEMULAI SERANGAN: ${TOTAL_ATTACKERS} user berebut kursi ${TARGET_SEAT}...`
-  );
+  console.log(`🔥 MEMULAI SERANGAN: ${TOTAL_ATTACKERS} user berebut kursi ${TARGET_SEAT}...`);
 
   const requests = [];
   let successCount = 0;
@@ -15,14 +12,12 @@ async function attack() {
 
   const startTime = Date.now();
 
-  // 1. Siapkan 100 Request secara serentak
   for (let i = 1; i <= TOTAL_ATTACKERS; i++) {
     const payload = {
       seatId: TARGET_SEAT,
-      userId: `User-${i}`, // User-1, User-2, dst
+      userId: `User-${i}`,
     };
 
-    // Kita push Promise ke array, jangan di-await dulu biar jalan paralel
     const req = fetch(SERVER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -31,11 +26,11 @@ async function attack() {
       .then(async (res) => {
         const data = await res.json();
 
-        if (res.status === 201) return "SUCCESS"; // NestJS default return 201 for POST
-        if (res.status === 409) return "BLOCKED"; // ✅ Conflict (Benar)
+        if (res.status === 201) return "SUCCESS";
+        if (res.status === 409) return "BLOCKED";
 
         console.log(`⚠️  Response ${res.status}:`, data.message);
-        return "ERROR"; // Error lain (Salah)
+        return "ERROR";
       })
       .catch((err) => {
         console.error("Connection Error:", err.message);
@@ -45,11 +40,9 @@ async function attack() {
     requests.push(req);
   }
 
-  // 2. TEMBAK SEMUANYA SEKALIGUS! 🔫
   const results = await Promise.all(requests);
   const endTime = Date.now();
 
-  // 3. Hitung Mayat
   results.forEach((status) => {
     if (status === "SUCCESS") successCount++;
     else if (status === "BLOCKED") failCount++;
@@ -68,9 +61,7 @@ async function attack() {
   if (successCount === 1 && failCount === TOTAL_ATTACKERS - 1) {
     console.log("🏆 KESIMPULAN: SISTEM AMAN & DATA KONSISTEN!");
   } else if (successCount === 0 && errorCount === 0) {
-    console.log(
-      "⚠️  KESIMPULAN: Semua request diblokir (mungkin kursi sudah BOOKED)"
-    );
+    console.log("⚠️  KESIMPULAN: Semua request diblokir (mungkin kursi sudah BOOKED)");
   } else {
     console.log("⚠️  KESIMPULAN: ADA KEBOCORAN! (Double Booking Terjadi)");
   }

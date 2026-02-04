@@ -12,13 +12,11 @@ import { EngineService } from './engine.service';
 export class EngineController {
   constructor(private readonly engineService: EngineService) {}
 
-  // Endpoint Lama (POST /book)
   @Post('book')
   async bookTicket(@Body() body: { seatId: string; userId: string }) {
     try {
       return await this.engineService.bookSeat(body.seatId, body.userId);
     } catch (error) {
-      // ✅ Proper error handling
       throw new HttpException(
         {
           statusCode: HttpStatus.CONFLICT,
@@ -30,7 +28,6 @@ export class EngineController {
     }
   }
 
-  // === ENDPOINT BARU (GET /tickets) ===
   @Get('tickets')
   async getTickets() {
     const tickets = await this.engineService.getAllTickets();
@@ -40,7 +37,6 @@ export class EngineController {
     };
   }
 
-  // === TOMBOL ADMIN: ISI GUDANG ===
   @Post('admin/seed')
   async seed() {
     return this.engineService.seedSeats();
