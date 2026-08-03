@@ -7,13 +7,14 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { EngineService } from './engine.service';
+import { BookTicketDto } from './dto/book-ticket.dto';
 
 @Controller()
 export class EngineController {
   constructor(private readonly engineService: EngineService) {}
 
   @Post('book')
-  async bookTicket(@Body() body: { seatId: string; userId: string }) {
+  async bookTicket(@Body() body: BookTicketDto) {
     try {
       return await this.engineService.bookSeat(body.seatId, body.userId);
     } catch (error) {

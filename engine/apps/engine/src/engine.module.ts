@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { EngineController } from './engine.controller';
 import { EngineService } from './engine.service';
 import { ClientsModule, Transport } from '@nestjs/microservices';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { CommonModule, Ticket, Seat } from '@app/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
@@ -10,17 +11,21 @@ import { TypeOrmModule } from '@nestjs/typeorm';
     CommonModule,
     TypeOrmModule.forFeature([Ticket, Seat]),
 
-    ClientsModule.register([
+    ClientsModule.registerAsync([
       {
         name: 'TICKET_SERVICE',
-        transport: Transport.RMQ,
-        options: {
-          urls: ['amqp://guest:guest@localhost:5672'],
-          queue: 'ticket_queue',
-          queueOptions: {
-            durable: true,
+        imports: [ConfigModule],
+        inject: [ConfigService],
+        useFactory: (config: ConfigService) => ({
+          transport: Transport.RMQ as const,
+          options: {
+            urls: [config.getOrThrow<string>('RABBITMQ_URL')],
+            queue: 'ticket_queue',
+            queueOptions: {
+              durable: true,
+            },
           },
-        },
+        }),
       },
     ]),
   ],

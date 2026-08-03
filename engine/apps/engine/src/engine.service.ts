@@ -1,21 +1,19 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Ticket, Seat } from '@app/common';
+import { Ticket, Seat, CommonService, seatLockKey } from '@app/common';
 import { Repository } from 'typeorm';
-import Redis from 'ioredis';
+
+/** Lock TTL — safety net if the worker dies before releasing. */
+const LOCK_TTL_SECONDS = 600;
 
 @Injectable()
 export class EngineService {
-  private readonly redis = new Redis({
-    host: 'localhost',
-    port: 6379,
-  });
-
   constructor(
     @Inject('TICKET_SERVICE') private readonly client: ClientProxy,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Seat) private readonly seatRepo: Repository<Seat>,
+    private readonly common: CommonService,
   ) {}
 
   async bookSeat(seatId: string, userId: string) {
@@ -35,9 +33,13 @@ export class EngineService {
       throw new Error(`Kursi ${seatId} sudah terjual.`);
     }
 
-    const redisKey = `lock:seat:${seatId}`;
+    const redisKey = seatLockKey(seatId);
 
-    const isLocked = await this.redis.set(redisKey, userId, 'EX', 600, 'NX');
+    const isLocked = await this.common.acquireLock(
+      redisKey,
+      userId,
+      LOCK_TTL_SECONDS,
+    );
 
     if (!isLocked) {
       console.log(
@@ -55,16 +57,16 @@ export class EngineService {
 
       console.log(`📤 Event terkirim ke Worker untuk ${seatId}`);
 
-      await this.redis.del(redisKey);
-      console.log(`🔓 UNLOCK REDIS: Kunci ${seatId} dilepas.`);
-
+      // Lock stays held on purpose — the worker releases it once the seat is
+      // durably BOOKED. Releasing here would reopen the double-booking window.
       return {
         message: 'Booking sedang diproses',
         seatId,
         userId,
       };
     } catch (error) {
-      await this.redis.del(redisKey);
+      // Emit failed, so no worker will ever release it.
+      await this.common.releaseLock(redisKey);
       console.log(
         `🔓 UNLOCK REDIS (ERROR): Kunci ${seatId} dilepas karena error.`,
       );
