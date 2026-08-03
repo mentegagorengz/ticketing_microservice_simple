@@ -1,4 +1,9 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn } from 'typeorm';
+import {
+  Entity,
+  Column,
+  PrimaryGeneratedColumn,
+  CreateDateColumn,
+} from 'typeorm';
 
 @Entity()
 export class Ticket {
@@ -11,7 +16,7 @@ export class Ticket {
   @Column()
   userId: string;
 
-  @Column({ default: 'PENDING' }) 
+  @Column({ default: 'PENDING' })
   status: string; // PENDING -> BOOKED -> ISSUED
 
   @CreateDateColumn()

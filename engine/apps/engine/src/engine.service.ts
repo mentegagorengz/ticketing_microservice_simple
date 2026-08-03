@@ -66,7 +66,7 @@ export class EngineService {
       };
     } catch (error) {
       // Emit failed, so no worker will ever release it.
-      await this.common.releaseLock(redisKey);
+      await this.common.releaseLock(redisKey, userId);
       console.log(
         `🔓 UNLOCK REDIS (ERROR): Kunci ${seatId} dilepas karena error.`,
       );

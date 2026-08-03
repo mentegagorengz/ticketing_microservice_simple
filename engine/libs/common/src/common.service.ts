@@ -42,7 +42,17 @@ export class CommonService implements OnModuleInit, OnModuleDestroy {
     return result === 'OK';
   }
 
-  async releaseLock(key: string): Promise<void> {
-    await this.redisClient.del(key);
+  // Compare-and-delete: hanya lepas lock kalau masih milik si pemegang.
+  // Mencegah worker tua (yang lock-nya sudah kadaluarsa TTL lalu diambil
+  // user lain) menghapus lock milik orang baru. Atomic via Lua, bukan
+  // get-then-del (race).
+  async releaseLock(key: string, owner: string): Promise<void> {
+    const script = `
+      if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('del', KEYS[1])
+      end
+      return 0
+    `;
+    await this.redisClient.eval(script, 1, key, owner);
   }
 }

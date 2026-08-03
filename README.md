@@ -59,11 +59,10 @@ npm run start:dev
 
 ```bash
 # di folder engine
-# worker juga dijalankan dari skrip nest; pastikan module worker di-start
-npm run start:dev
+npx nest start worker
 ```
 
-Catatan: kedua app (`apps/engine` dan `apps/worker`) berada di monorepo yang sama. Anda bisa menyesuaikan perintah start untuk menjalankan masing-masing entry point secara terpisah atau membangun terlebih dahulu (`npm run build`).
+Catatan: `engine` dan `worker` adalah dua app terpisah dalam monorepo yang sama (lihat `nest-cli.json`). `npm run start:dev` untuk HTTP API, `npx nest start worker` untuk consumer. Keduanya bisa jalan bersamaan.
 
 ## Environment & konfigurasi
 
@@ -82,14 +81,23 @@ Lihat implementasi di `engine/apps/engine/src/engine.controller.ts` dan `engine/
 ## Alur singkat
 
 1. Client → POST /book ke `engine`
-2. `engine` validasi + ambil Redis lock jika perlu → publish event `ticket_created` ke RabbitMQ
-3. `worker` mendengarkan event → proses finalisasi: simpan `Ticket`, update `Seat` di Postgres
+2. `engine` validasi seat (`AVAILABLE`), ambil Redis lock (`SET NX`, TTL 600s) → publish event `ticket_created` ke RabbitMQ
+3. `worker` mendengarkan event → finalisasi: simpan `Ticket` (PENDING → BOOKED), update `Seat` ke `BOOKED`
+4. `worker` lepas Redis lock (compare-and-delete, hanya kalau masih pemegangnya) → selesai generate PDF/QR → tiket `ISSUED`
+
+### Keamanan & kegagalan
+
+- **Lock holder-aware**: `releaseLock` memakai Lua compare-and-delete. Worker yang lock-nya sudah kedaluwarsa TTL tidak bisa menghapus lock milik user baru.
+- **Manual ack** (`noAck: false`): pesan gagal di-requeue hingga 3x (transient error, mis. DB down). Setelah 3x gagal, pesan di-drop agar poison message tidak looping selamanya; tiket ditandai `FAILED` di DB.
+- **Idempotent**: retry tidak membuat tiket duplikat — tiket lama yang belum `ISSUED` dipakai ulang; duplikat yang sudah `ISSUED` di-skip.
+- **Status tiket**: `PENDING` → `BOOKED` → `ISSUED` (atau `FAILED` jika proses gagal).
 
 ## Scripts penting
 
 Di direktori `engine` ada beberapa npm scripts (lihat `engine/package.json`):
 
-- `npm run start:dev` — jalankan NestJS dalam mode watch
+- `npm run start:dev` — jalankan HTTP API (Engine) dalam mode watch
+- `npx nest start worker` — jalankan Worker (RabbitMQ consumer)
 - `npm run build` — build project
 - `npm run lint` — jalankan ESLint
 - `npm run test` — jalankan jest

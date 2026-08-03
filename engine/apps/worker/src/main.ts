@@ -19,6 +19,8 @@ async function bootstrap() {
       options: {
         urls: [url],
         queue: 'ticket_queue',
+        noAck: false, // manual ack/nack di controller; kalau tidak, ack() di
+        // controller tidak berefek dan pesan tak pernah di-retry.
         queueOptions: {
           durable: true,
         },

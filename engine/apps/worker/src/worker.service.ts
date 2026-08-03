@@ -15,14 +15,29 @@ export class WorkerService {
     console.log(`\n=============================`);
     console.log(`⚡ Memproses tiket untuk User: ${data.userId}`);
 
-    // PENDING — claimed, nothing durable yet.
-    const newTicket = new Ticket();
-    newTicket.seatId = data.seatId;
-    newTicket.userId = data.userId;
-    newTicket.status = 'PENDING';
+    // Idempotent: retry (misal crash setelah PENDING tersimpan) tidak boleh
+    // membuat tiket duplikat. Reuse tiket lama yang belum sampai ISSUED.
+    let savedTicket = await this.ticketRepo.findOne({
+      where: { seatId: data.seatId },
+    });
 
-    const savedTicket = await this.ticketRepo.save(newTicket);
-    console.log(`💾 Tiket PENDING tersimpan! ID: ${savedTicket.id}`);
+    if (!savedTicket || savedTicket.status === 'ISSUED') {
+      // Sudah ISSUED = pesan terkirim dua kali (ack hilang). Jangan duplikat.
+      if (savedTicket?.status === 'ISSUED') {
+        console.log(`♻️ Duplikat: tiket ${savedTicket.id} sudah ISSUED. Skip.`);
+        return;
+      }
+      const newTicket = new Ticket();
+      newTicket.seatId = data.seatId;
+      newTicket.userId = data.userId;
+      newTicket.status = 'PENDING';
+      savedTicket = await this.ticketRepo.save(newTicket);
+      console.log(`💾 Tiket PENDING tersimpan! ID: ${savedTicket.id}`);
+    } else {
+      console.log(
+        `♻️ Retry: pakai tiket lama ${savedTicket.id} (status ${savedTicket.status})`,
+      );
+    }
 
     try {
       // BOOKED — seat is now taken. Only guard the engine has once the lock drops.
@@ -32,10 +47,15 @@ export class WorkerService {
       );
       await this.ticketRepo.update(savedTicket.id, { status: 'BOOKED' });
       console.log(`🔒 Kursi ${data.seatId} + tiket set ke BOOKED`);
+    } catch (error) {
+      // Jangan biarkan tiket nyangkut PENDING selamanya saat seat update gagal.
+      await this.ticketRepo.update(savedTicket.id, { status: 'FAILED' });
+      throw error;
     } finally {
       // Seat is durably BOOKED (or the update threw and we must not wedge the
       // seat for the full TTL) — either way the lock has done its job.
-      await this.common.releaseLock(seatLockKey(data.seatId));
+      // Hanya lepas kalau kita masih pemegangnya.
+      await this.common.releaseLock(seatLockKey(data.seatId), data.userId);
       console.log(`🔓 UNLOCK REDIS: Kunci ${data.seatId} dilepas.`);
     }
 
