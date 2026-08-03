@@ -24,11 +24,11 @@ export class CommonService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.redisClient.on('connect', () => {
-      this.logger.log('🚀 Terhubung ke Redis Docker!');
+      this.logger.log('Connected to Redis');
     });
 
     this.redisClient.on('error', (err) => {
-      this.logger.error('❌ Redis Error:', err);
+      this.logger.error('Redis error:', err);
     });
   }
 

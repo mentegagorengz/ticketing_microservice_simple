@@ -7,7 +7,7 @@ import {
 
 @Entity()
 export class Ticket {
-  @PrimaryGeneratedColumn('uuid') // ID unik acak (contoh: a1b2-c3d4...)
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column()
@@ -17,7 +17,7 @@ export class Ticket {
   userId: string;
 
   @Column({ default: 'PENDING' })
-  status: string; // PENDING -> BOOKED -> ISSUED
+  status: string;
 
   @CreateDateColumn()
   createdAt: Date;

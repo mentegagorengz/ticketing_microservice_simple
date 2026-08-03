@@ -1,122 +1,133 @@
-# Ticket System (NestJS)
+# Ticket Booking System (Asynchronous)
 
-Proyek ini adalah contoh sistem ticketing asinkron yang menggunakan arsitektur HTTP API (producer) + Worker (consumer) dengan shared library. Dirancang sebagai monorepo NestJS dengan komponen utama:
+Sistem pemesanan tiket asinkron berbasis event-driven. HTTP API menerima permintaan booking, lalu finalisasi tiket dikerjakan oleh worker terpisah melalui RabbitMQ — dengan Redis lock sebagai penjaga konsistensi agar dua user tidak pernah mendapat tiket kursi yang sama.
 
-- `engine/apps/engine` — HTTP API yang menerima permintaan booking dan menerbitkan event ke RabbitMQ.
-- `engine/apps/worker` — Worker/microservice yang mendengarkan event RabbitMQ dan melakukan finalisasi (simpan Ticket, update Seat).
-- `engine/libs/common` — Shared library: entitas TypeORM (`Ticket`, `Seat`), koneksi TypeORM, dan helper Redis lock.
-- `docker-compose.yml` — Infrastruktur dev: PostgreSQL, Redis, RabbitMQ.
+## Fitur utama
 
-## Teknologi utama
+- **Anti double-booking**: Redis distributed lock (`SET NX` + TTL) membatasi satu kursi untuk satu user pada satu waktu.
+- **Pemisahan producer-consumer**: HTTP API (engine) dan pemroses tiket (worker) berjalan sebagai proses terpisah, terhubung via RabbitMQ queue yang durable.
+- **At-least-once + idempotent**: pesan yang gagal diproses di-retry hingga 3 kali; pemrosesan ulang tidak membuat tiket duplikat.
+- **Owner-aware lock release**: pelepasan lock memakai Lua compare-and-delete, sehingga proses yang lock-nya sudah kedaluwarsa tidak bisa mencabut lock milik proses lain.
+- **Status tiket ter-track**: `PENDING` → `BOOKED` → `ISSUED`, atau `FAILED` jika proses gagal.
 
-- Node.js + TypeScript
-- NestJS (HTTP + Microservices)
-- TypeORM + PostgreSQL
-- RabbitMQ (amqplib, amqp-connection-manager)
-- Redis (ioredis) — untuk mekanisme lock
-- Docker / Docker Compose — untuk menjalankan infra dev
-- Jest — unit & e2e tests
+## Arsitektur
 
-## Struktur singkat
-
-- `engine/` — monorepo NestJS
-  - `apps/engine` — HTTP API
-  - `apps/worker` — Worker (RabbitMQ consumer)
-  - `libs/common` — shared entities & utilities
-- `docker-compose.yml` — service: postgres, redis, rabbitmq
-- `war-test.js` — skrip load-test sederhana
-
-## Prasyarat
-
-- Docker & Docker Compose
-- Node.js (direkomendasikan v18+)
-- npm
-
-## Quickstart (lokal)
-
-1. Jalankan infrastruktur (Postgres, Redis, RabbitMQ):
-
-```bash
-docker compose up -d
+```
+┌──────────────┐   POST /book    ┌──────────────────────────────────────────────┐
+│    Client    │ ──────────────▶ │                  ENGINE (HTTP)                 │
+└──────────────┘                 │ 1. Validasi seat (status AVAILABLE)          │
+                                 │ 2. Redis lock: SET lock:seat:<id> NX EX 600  │
+                                 │ 3. Publish event ticket_created             │
+                                 └──────────────┬───────────────────────────────┘
+                                                │ RabbitMQ (queue: ticket_queue,
+                                                │ durable)
+                                                ▼
+                                 ┌──────────────────────────────────────────────┐
+                                 │              WORKER (consumer)                │
+                                 │ 1. Simpan Ticket (PENDING)                   │
+                                 │ 2. Update Seat → BOOKED + Ticket → BOOKED    │
+                                 │ 3. Release Redis lock (compare-and-delete)   │
+                                 │ 4. Generate PDF/QR → Ticket → ISSUED         │
+                                 │ 5. Ack pesan; retry 3x jika gagal            │
+                                 └──────────────────────────────────────────────┘
+                                              │
+                    ┌─────────────────────────┼─────────────────────────┐
+                    ▼                         ▼                         ▼
+               PostgreSQL                  Redis                    (worker lain
+               (Seat, Ticket)              (lock)                   bisa scale-out)
 ```
 
-2. Install dependencies (dari root project):
+## Alur booking
+
+1. `POST /book` dengan `{ seatId, userId }` masuk ke engine.
+2. Engine memvalidasi kursi masih `AVAILABLE`, lalu mengambil Redis lock untuk kursi tersebut. Gagal dapat lock (ada proses lain) → request ditolak `409`.
+3. Engine mempublikasikan event `ticket_created` ke RabbitMQ. Lock sengaja **tidak dilepas di sini** — yang melepas adalah worker setelah kursi tersimpan durable ke `BOOKED`, sehingga tidak ada celah double-booking antara request sukses dan finalisasi.
+4. Worker menerima event, menyimpan tiket `PENDING`, mengunci kursi jadi `BOOKED`, melepas lock, lalu menuntaskan tiket menjadi `ISSUED`.
+5. Jika emisi event gagal, engine melepas lock sendiri agar kursi tidak terkunci.
+
+## Keputusan teknis & trade-off
+
+| Masalah | Solusi | Catatan |
+|---|---|---|
+| Dua request bersamaan untuk kursi sama | Redis lock `SET NX EX` di engine | TTL 600s sebagai safety net jika worker mati; lock dipegang sampai worker finalisasi, bukan langsung dilepas setelah request |
+| Lock salah dilepas oleh proses lain | Lua compare-and-delete | Release hanya dijalankan jika value lock masih milik pemegangnya (userId), bukan `DEL` polos |
+| Pesan gagal hilang diam-diam | Manual ack (`noAck: false`) + retry 3x | Setelah 3x gagal, pesan di-drop (bukan requeue tak terbatas yang bisa infinite-loop); tiket ditandai `FAILED` |
+| Retry membuat tiket duplikat | Idempotent processing | Worker mencari tiket lama per seat sebelum membuat baru; duplikat yang sudah `ISSUED` di-skip |
+| Konfigurasi antar-app tidak konsisten | Shared library `@app/common` | Entitas TypeORM, koneksi DB/Redis, dan fungsi lock berada di satu tempat agar tidak saling menyimpang |
+
+## Tech stack
+
+- **Runtime**: Node.js + TypeScript
+- **Framework**: NestJS (HTTP + Microservices), monorepo
+- **Messaging**: RabbitMQ (amqplib) — queue durable
+- **Database**: PostgreSQL via TypeORM (entitas `Seat`, `Ticket`)
+- **Caching/Lock**: Redis (ioredis)
+- **Infrastruktur dev**: Docker Compose
+- **Testing**: Jest
+
+## Struktur repo
+
+```
+ticketing-system/
+├── docker-compose.yml          # PostgreSQL, Redis, RabbitMQ
+├── war-test.js                 # Load test: 100 user berebut 1 kursi
+└── engine/                     # NestJS monorepo
+    ├── apps/
+    │   ├── engine/             # HTTP API (producer)
+    │   └── worker/             # RabbitMQ consumer
+    └── libs/
+        └── common/             # Entitas, koneksi DB, Redis lock (shared)
+```
+
+## Quickstart
+
+Prasyarat: Docker, Node.js 18+, npm.
 
 ```bash
+# 1. Jalankan infrastruktur (PostgreSQL, Redis, RabbitMQ)
+docker compose up -d
+
+# 2. Install dependencies
 cd engine
 npm install
-```
 
-3. Jalankan HTTP API (Engine):
+# 3. Terminal 1 — HTTP API
+npm run start:dev              # http://localhost:3000
 
-```bash
-# di folder engine
-npm run start:dev
-# default: http://localhost:3000
-```
-
-4. Jalankan Worker (di terminal lain):
-
-```bash
-# di folder engine
+# 4. Terminal 2 — Worker
 npx nest start worker
 ```
 
-Catatan: `engine` dan `worker` adalah dua app terpisah dalam monorepo yang sama (lihat `nest-cli.json`). `npm run start:dev` untuk HTTP API, `npx nest start worker` untuk consumer. Keduanya bisa jalan bersamaan.
+Environment diambil dari `.env` di root project (lihat `.env.example`).
 
-## Environment & konfigurasi
+## Endpoint
 
-Periksa konfigurasi koneksi database, Redis, dan RabbitMQ di `engine/libs/common/src/common.module.ts` dan file konfigurasi terkait. Pastikan port/host sesuai dengan `docker-compose.yml` bila Anda menjalankan infra via Docker.
+| Method | Path | Deskripsi |
+|---|---|---|
+| POST | `/book` | Buat booking `{ seatId, userId }`. Sukses → 201 (diproses asinkron); kursi diproses user lain → 409 |
+| GET | `/tickets` | Daftar tiket, terbaru dulu |
+| POST | `/admin/seed` | Seed 100 kursi (A-1 .. A-100; 20 VIP) |
 
-> Perhatian: TypeORM biasanya diset `synchronize: true` di konfigurasi dev — hanya untuk pengembangan.
+## Testing
 
-## Endpoint penting (Engine)
+```bash
+cd engine
+npm run test        # unit tests (engine, worker, common)
+```
 
-- POST /admin/seed — seed data kursi (populate seats)
-- POST /book — buat permintaan booking (HTTP API membuat event ke RabbitMQ)
-- GET /tickets — list tiket
+Selain unit test, `war-test.js` mengirim 100 request serentak untuk kursi yang sama:
 
-Lihat implementasi di `engine/apps/engine/src/engine.controller.ts` dan `engine/apps/engine/src/engine.service.ts`.
+```
+Sukses (dapat tiket) : 1
+Diblokir (409)       : 99
+Error sistem         : 0
+```
 
-## Alur singkat
+Hasil: tepat satu user mendapatkan kursi, sisanya ditolak, tanpa double booking.
 
-1. Client → POST /book ke `engine`
-2. `engine` validasi seat (`AVAILABLE`), ambil Redis lock (`SET NX`, TTL 600s) → publish event `ticket_created` ke RabbitMQ
-3. `worker` mendengarkan event → finalisasi: simpan `Ticket` (PENDING → BOOKED), update `Seat` ke `BOOKED`
-4. `worker` lepas Redis lock (compare-and-delete, hanya kalau masih pemegangnya) → selesai generate PDF/QR → tiket `ISSUED`
+## Batasan & roadmap
 
-### Keamanan & kegagalan
-
-- **Lock holder-aware**: `releaseLock` memakai Lua compare-and-delete. Worker yang lock-nya sudah kedaluwarsa TTL tidak bisa menghapus lock milik user baru.
-- **Manual ack** (`noAck: false`): pesan gagal di-requeue hingga 3x (transient error, mis. DB down). Setelah 3x gagal, pesan di-drop agar poison message tidak looping selamanya; tiket ditandai `FAILED` di DB.
-- **Idempotent**: retry tidak membuat tiket duplikat — tiket lama yang belum `ISSUED` dipakai ulang; duplikat yang sudah `ISSUED` di-skip.
-- **Status tiket**: `PENDING` → `BOOKED` → `ISSUED` (atau `FAILED` jika proses gagal).
-
-## Scripts penting
-
-Di direktori `engine` ada beberapa npm scripts (lihat `engine/package.json`):
-
-- `npm run start:dev` — jalankan HTTP API (Engine) dalam mode watch
-- `npx nest start worker` — jalankan Worker (RabbitMQ consumer)
-- `npm run build` — build project
-- `npm run lint` — jalankan ESLint
-- `npm run test` — jalankan jest
-- `npm run test:e2e` — jalankan e2e tests untuk `apps/engine`
-- `npm run format` — prettier
-
-## Testing & load testing
-
-- Unit & e2e: menggunakan Jest. Jalankan `npm run test` atau `npm run test:e2e` dari folder `engine`.
-- Load test: `war-test.js` (root) — skrip sederhana untuk mengirim banyak request POST /book.
-
-## Troubleshooting singkat
-
-- Pastikan Docker Compose berjalan: `docker compose ps`.
-- Jika worker/engine tidak terhubung ke DB/Rabbit/Redis, periksa konfigurasi host/port dan variable environment pada code.
-- Jika ada masalah TypeORM migration/schema, cek bahwa `synchronize` sesuai untuk dev.
-
-## Next steps & rekomendasi
-
-- Tambahkan CI (GitHub Actions) untuk lint, test, dan build.
-- Commit lockfile (`package-lock.json`/`pnpm-lock.yaml`) untuk reproducible installs.
-- Jika hendak deploy ke production: matikan `synchronize`, tambahkan migration, dan amankan credentials.
+- Belum ada dead-letter queue — pesan yang drop setelah 3x retry hanya tercatat di log dan status tiket `FAILED`. Upgrade: DLQ + retry dengan backoff (RabbitMQ delayed message plugin).
+- `synchronize: true` di TypeORM hanya untuk pengembangan; produksi harus migration.
+- PDF/QR masih simulasi (delay 1 detik), belum diimplementasikan.
+- Lock tidak auto-renewal; TTL 600s cukup untuk kasus sekarang.

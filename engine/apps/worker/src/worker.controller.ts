@@ -1,4 +1,4 @@
-import { Controller } from '@nestjs/common';
+import { Controller, Logger } from '@nestjs/common';
 import { EventPattern, Payload, Ctx, RmqContext } from '@nestjs/microservices';
 import { WorkerService } from './worker.service';
 
@@ -6,6 +6,8 @@ const MAX_ATTEMPTS = 3;
 
 @Controller()
 export class WorkerController {
+  private readonly logger = new Logger(WorkerController.name);
+
   // Key = isi pesan (seatId+userId) — cukup unik per job untuk hitung retry.
   private readonly attempts = new Map<string, number>();
 
@@ -29,8 +31,8 @@ export class WorkerController {
       if (shouldRetry) {
         // Requeue: antre lagi, mungkin transient (DB down dll).
         channel.nack(originalMsg, false, true);
-        console.error(
-          `❌ Worker Error (retry ${count}/${MAX_ATTEMPTS}):`,
+        this.logger.error(
+          `Processing failed, retrying ${count}/${MAX_ATTEMPTS}:`,
           error,
         );
       } else {
@@ -41,7 +43,10 @@ export class WorkerController {
         // message plugin) + dashboard DLQ manual.
         this.attempts.delete(key);
         channel.nack(originalMsg, false, false);
-        console.error(`❌ Worker Error PERMANEN (drop):`, error);
+        this.logger.error(
+          'Processing failed permanently, message dropped:',
+          error,
+        );
       }
     }
   }

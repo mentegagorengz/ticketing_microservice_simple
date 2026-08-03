@@ -1,14 +1,16 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Ticket, Seat, CommonService, seatLockKey } from '@app/common';
 import { Repository } from 'typeorm';
 
-/** Lock TTL — safety net if the worker dies before releasing. */
+// Safety net: worker yang mati sebelum release tidak mengunci kursi selamanya.
 const LOCK_TTL_SECONDS = 600;
 
 @Injectable()
 export class EngineService {
+  private readonly logger = new Logger(EngineService.name);
+
   constructor(
     @Inject('TICKET_SERVICE') private readonly client: ClientProxy,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -17,19 +19,19 @@ export class EngineService {
   ) {}
 
   async bookSeat(seatId: string, userId: string) {
-    console.log(`\n🎫 Request Booking: ${seatId} oleh ${userId}`);
+    this.logger.log(`Booking request: seat ${seatId} by ${userId}`);
 
     const seat = await this.seatRepo.findOne({
       where: { seatNumber: seatId },
     });
 
     if (!seat) {
-      console.log(`❌ DITOLAK: Kursi ${seatId} tidak ditemukan di Inventory.`);
+      this.logger.warn(`Rejected: seat ${seatId} not found`);
       throw new Error(`Kursi ${seatId} tidak valid.`);
     }
 
     if (seat.status !== 'AVAILABLE') {
-      console.log(`❌ DITOLAK: Kursi ${seatId} statusnya ${seat.status}.`);
+      this.logger.warn(`Rejected: seat ${seatId} already ${seat.status}`);
       throw new Error(`Kursi ${seatId} sudah terjual.`);
     }
 
@@ -42,36 +44,33 @@ export class EngineService {
     );
 
     if (!isLocked) {
-      console.log(
-        `🛡️ BLOKIR REDIS: Kursi ${seatId} sedang diproses orang lain.`,
+      this.logger.warn(
+        `Rejected: seat ${seatId} locked by another booking in progress`,
       );
       throw new Error(
         'Kursi sedang dalam proses pemesanan orang lain. Coba lagi.',
       );
     }
 
-    console.log(`✅ KUNCI REDIS: Berhasil mengunci ${seatId} untuk ${userId}`);
+    this.logger.log(`Lock acquired: seat ${seatId} for ${userId}`);
 
     try {
       await this.client.emit('ticket_created', { seatId, userId }).toPromise();
 
-      console.log(`📤 Event terkirim ke Worker untuk ${seatId}`);
+      this.logger.log(`Event ticket_created published for seat ${seatId}`);
 
-      // Lock stays held on purpose — the worker releases it once the seat is
-      // durably BOOKED. Releasing here would reopen the double-booking window.
+      // Lock sengaja dipertahankan di sini — worker yang melepas setelah seat
+      // tersimpan durable ke BOOKED. Release di sini membuka celah double-booking.
       return {
         message: 'Booking sedang diproses',
         seatId,
         userId,
       };
     } catch (error) {
-      // Emit failed, so no worker will ever release it.
+      // Emit gagal, tidak akan ada worker yang melepas lock.
       await this.common.releaseLock(redisKey, userId);
-      console.log(
-        `🔓 UNLOCK REDIS (ERROR): Kunci ${seatId} dilepas karena error.`,
-      );
-
-      console.error(`❌ Gagal kirim event ke Worker:`, error);
+      this.logger.log(`Lock released after emit failure: seat ${seatId}`);
+      this.logger.error('Failed to publish ticket_created:', error);
       throw new Error('Gagal memproses booking. Silakan coba lagi.');
     }
   }

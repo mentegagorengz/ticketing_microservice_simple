@@ -29,7 +29,7 @@ async function bootstrap() {
   );
 
   await app.listen();
-  console.log('👷 Worker sedang bekerja... Menunggu pesanan tiket.');
+  console.log('Worker listening for ticket_created events.');
 }
 
 bootstrap().catch((err) => {
